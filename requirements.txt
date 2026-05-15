@@ -1,0 +1,22 @@
+# PyTorch — install CUDA wheels from https://pytorch.org/get-started/locally/
+# Example for CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0
+
+# HuggingFace stack (MolmoAct2 is loaded via transformers + trust_remote_code)
+transformers>=4.47.0
+huggingface-hub>=0.24.0
+
+# LeRobot SO-101 drivers
+# IMPORTANT: use exactly 0.5.1 — later versions changed the joint-angle
+# convention and will cause the arm to slam into the table on startup.
+# See https://huggingface.co/docs/lerobot/backwardcomp
+lerobot==0.5.1
+
+# Cameras
+opencv-python>=4.8.0
+pyrealsense2>=2.54.0
+Pillow>=10.0.0
+
+# Numerics
+numpy>=1.24.0

@@ -1,0 +1,45 @@
+{
+    "_note": "These are calibration values specific to one particular SO-101 arm. You MUST replace this file with your own calibration. Run `lerobot-calibrate` per the LeRobot docs, then copy the generated file from ~/.cache/huggingface/lerobot/calibration/robots/so_follower/so_follower.json",
+    "shoulder_pan": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": 1618,
+        "range_min": 785,
+        "range_max": 3315
+    },
+    "shoulder_lift": {
+        "id": 2,
+        "drive_mode": 0,
+        "homing_offset": -974,
+        "range_min": 880,
+        "range_max": 3227
+    },
+    "elbow_flex": {
+        "id": 3,
+        "drive_mode": 0,
+        "homing_offset": 849,
+        "range_min": 1097,
+        "range_max": 3312
+    },
+    "wrist_flex": {
+        "id": 4,
+        "drive_mode": 0,
+        "homing_offset": -1826,
+        "range_min": 665,
+        "range_max": 2971
+    },
+    "wrist_roll": {
+        "id": 5,
+        "drive_mode": 0,
+        "homing_offset": 593,
+        "range_min": 0,
+        "range_max": 4095
+    },
+    "gripper": {
+        "id": 6,
+        "drive_mode": 0,
+        "homing_offset": 1993,
+        "range_min": 1972,
+        "range_max": 3485
+    }
+}

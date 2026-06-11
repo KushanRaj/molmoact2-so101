@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from molmoact_so101.setup.robot import FollowerArm, RealSenseCapture
+from molmoact_so101.setup.opencv_camera import OpenCVCamera
 from molmoact_so101.setup.wrist_camera import WristCamera, FLIP_CHOICES
 from molmoact_so101.setup.frame_transforms import (
     parse_joint_limits, parse_joint_offsets, parse_joint_signs,
@@ -40,8 +41,17 @@ def parse_args():
     p.add_argument("--wrist-cam-id", type=int, default=8,
                    help="OpenCV index of the wrist USB camera. "
                         "Find yours with `v4l2-ctl --list-devices`.")
+    p.add_argument("--wrist-source", default=None,
+                   help="Generic OpenCV source for top/wrist view. Use this on "
+                        "macOS or for phone-as-webcam. If omitted, uses the "
+                        "original Linux SO101 WristCamera wrapper.")
     p.add_argument("--wrist-flip", choices=FLIP_CHOICES, default="180",
                    help="Flip the wrist image to match training orientation.")
+    p.add_argument("--scene-source", default=None,
+                   help="OpenCV source for side/scene view. If set, this replaces "
+                        "RealSense. Use an index like 0/1 or a stream URL.")
+    p.add_argument("--scene-flip", choices=FLIP_CHOICES, default="none",
+                   help="Flip side/scene OpenCV image when --scene-source is used.")
     p.add_argument("--realsense-serial", default=None,
                    help="RealSense D455 serial number. Omit to use the first device found.")
     # ── Task ─────────────────────────────────────────────────────────────────
@@ -106,7 +116,7 @@ def parse_args():
     return p.parse_args()
 
 
-def warmup_cameras(wrist: WristCamera, scene: RealSenseCapture,
+def warmup_cameras(wrist, scene,
                    timeout: float = 30.0) -> None:
     """Block until both cameras produce frames, or raise on timeout.
 
@@ -126,18 +136,17 @@ def warmup_cameras(wrist: WristCamera, scene: RealSenseCapture,
         if wrist_ok and scene_ok:
             return
         if time.time() > next_log:
-            print(f"[MolmoAct]   waiting... wrist={wrist_ok} realsense={scene_ok}")
+            print(f"[MolmoAct]   waiting... wrist/top={wrist_ok} scene={scene_ok}")
             next_log = time.time() + 2.0
         time.sleep(0.1)
     raise RuntimeError(
         f"Cameras did not produce frames in {timeout:.0f}s "
-        f"(wrist={wrist_ok}, realsense={scene_ok}). "
-        "Check USB connections — RealSense needs a USB-3 data cable."
+        f"(wrist/top={wrist_ok}, scene={scene_ok}). "
+        "Check camera connections and source indexes."
     )
 
 
-def install_cleanup_handlers(follower: FollowerArm, wrist: WristCamera,
-                             scene: RealSenseCapture):
+def install_cleanup_handlers(follower: FollowerArm, wrist, scene):
     """Register an idempotent cleanup that fires on any exit path."""
     lock = threading.Lock()
     done = [False]
@@ -207,10 +216,24 @@ def main():
         apply_patches=False,
     )
 
-    wrist    = WristCamera(args.wrist_cam_id, flip=args.wrist_flip,
-                           enable_ae=not args.no_wrist_ae)
+    if args.wrist_source is None:
+        wrist = WristCamera(args.wrist_cam_id, flip=args.wrist_flip,
+                            enable_ae=not args.no_wrist_ae)
+    else:
+        wrist = OpenCVCamera(
+            args.wrist_source,
+            name="wrist/top",
+            flip=args.wrist_flip,
+        )
     follower = FollowerArm(port=args.follower_port)
-    scene    = RealSenseCapture(serial=args.realsense_serial)
+    if args.scene_source is None:
+        scene = RealSenseCapture(serial=args.realsense_serial)
+    else:
+        scene = OpenCVCamera(
+            args.scene_source,
+            name="scene",
+            flip=args.scene_flip,
+        )
 
     warmup_cameras(wrist, scene)
     follower.set_target(follower.get_state())  # latch current pose before torque-on

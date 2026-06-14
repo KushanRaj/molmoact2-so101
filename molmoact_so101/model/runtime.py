@@ -264,6 +264,8 @@ class _ExecutionConsumer(threading.Thread):
                 if not holding:
                     print("[Consumer] no active chunks — holding last action")
                     holding = True
+                if self._last_sent is not None:
+                    self.follower.set_target(self._last_sent)
                 time.sleep(interval)
                 continue
             holding = False

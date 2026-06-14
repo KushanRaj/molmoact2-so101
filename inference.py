@@ -30,6 +30,7 @@ from molmoact_so101.setup.frame_transforms import (
     parse_joint_limits, parse_joint_offsets, parse_joint_signs,
 )
 from molmoact_so101.model.policy import MolmoActPolicy, REPO_ID, DTYPES as _DTYPES
+from molmoact_so101.model.policy_api import DummyPolicy, RemoteHttpPolicy
 from molmoact_so101.model.runtime import AsyncPolicyRunner, RuntimeConfig
 
 
@@ -73,6 +74,27 @@ def parse_args():
     p.add_argument("--warmup-predictions", type=int, default=None,
                    help="Discard this many initial predictions before moving the arm. "
                         "Defaults to 2 with --cuda-graph, else 0.")
+    p.add_argument("--min-query-period", type=float, default=0.0,
+                   help="Minimum seconds between policy queries. Default preserves "
+                        "original behavior; use this to throttle dummy/API tests.")
+    p.add_argument("--policy-backend", default="molmo",
+                   choices=["molmo", "dummy", "remote-http"],
+                   help="Brain backend. 'dummy' is for hardware-loop smoke tests; "
+                        "'remote-http' sends camera/state/prompt to another machine.")
+    p.add_argument("--remote-url", default=None,
+                   help="HTTP endpoint for --policy-backend remote-http.")
+    p.add_argument("--remote-timeout", type=float, default=30.0,
+                   help="Request timeout for --policy-backend remote-http.")
+    p.add_argument("--dummy-mode", default="gripper-open-close",
+                   choices=[
+                       "hold", "gripper-open-close", "shoulder-pan-wave",
+                       "shoulder-lift-wave", "wrist-flex-wave",
+                   ],
+                   help="Hardcoded action generator for --policy-backend dummy.")
+    p.add_argument("--dummy-chunk-len", type=int, default=30,
+                   help="Number of actions per dummy chunk.")
+    p.add_argument("--dummy-amplitude", type=float, default=12.0,
+                   help="Wave amplitude in degrees for dummy joint modes.")
     # ── Safety ────────────────────────────────────────────────────────────────
     p.add_argument("--max-step-deg", type=float, default=15.0,
                    help="Per-tick joint motion cap (degrees). The entire delta is "
@@ -99,6 +121,11 @@ def parse_args():
     p.add_argument("--smooth-alpha", type=float, default=1.0,
                    help="Final EMA low-pass on ensemble output (1.0 = off). "
                         "Try 0.5–0.7 if you see high-frequency jitter.")
+    p.add_argument("--chunk-timestamp", default="observation",
+                   choices=["observation", "arrival"],
+                   help="'observation' preserves the original async semantics. "
+                        "'arrival' starts each chunk when it returns, useful for "
+                        "slow local/remote smoke tests.")
     # ── Misc ──────────────────────────────────────────────────────────────────
     p.add_argument("--scene-only", action="store_true",
                    help="Pass the RealSense scene image twice, ignoring the wrist "
@@ -194,6 +221,30 @@ def run_display_loop(runner: AsyncPolicyRunner, show: bool) -> None:
         print("\n[MolmoAct] Interrupted.")
 
 
+def build_policy(args):
+    """Create the selected brain backend."""
+    if args.policy_backend == "molmo":
+        return MolmoActPolicy.from_pretrained(
+            REPO_ID,
+            dtype=args.dtype,
+            device=args.device,
+            apply_patches=False,
+        )
+    if args.policy_backend == "dummy":
+        print(f"[MolmoAct] Using dummy policy backend: {args.dummy_mode}")
+        return DummyPolicy(
+            mode=args.dummy_mode,
+            chunk_len=args.dummy_chunk_len,
+            amplitude=args.dummy_amplitude,
+        )
+    if args.policy_backend == "remote-http":
+        if not args.remote_url:
+            raise SystemExit("--remote-url is required with --policy-backend remote-http")
+        print(f"[MolmoAct] Using remote HTTP policy backend: {args.remote_url}")
+        return RemoteHttpPolicy(args.remote_url, timeout=args.remote_timeout)
+    raise SystemExit(f"Unknown --policy-backend {args.policy_backend!r}")
+
+
 def main():
     args = parse_args()
     if args.warmup_predictions is None:
@@ -209,12 +260,7 @@ def main():
         print(f"           signs   = {joint_signs.tolist()}")
         print(f"           offsets = {joint_offsets.tolist()}")
 
-    policy = MolmoActPolicy.from_pretrained(
-        REPO_ID,
-        dtype=args.dtype,
-        device=args.device,
-        apply_patches=False,
-    )
+    policy = build_policy(args)
 
     if args.wrist_source is None:
         wrist = WristCamera(args.wrist_cam_id, flip=args.wrist_flip,
@@ -258,6 +304,8 @@ def main():
         warmup_predictions=args.warmup_predictions,
         num_steps=args.num_steps,
         cuda_graph=args.cuda_graph,
+        min_query_period=args.min_query_period,
+        chunk_timestamp=args.chunk_timestamp,
         scene_only=args.scene_only,
         save_frames_dir=args.save_frames_dir,
         dry_run=args.dry_run,

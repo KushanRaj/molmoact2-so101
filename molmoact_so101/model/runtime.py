@@ -52,6 +52,8 @@ class RuntimeConfig:
     warmup_predictions: int = 0
     num_steps: int = 10
     cuda_graph: bool = False
+    min_query_period: float = 0.0
+    chunk_timestamp: str = "observation"
     scene_only: bool = False
     save_frames_dir: Optional[str] = None
     dry_run: bool = False
@@ -192,13 +194,22 @@ class _InferenceProducer(threading.Thread):
                           f"({dt_ms:.0f} ms) — not publishing")
                     continue
 
-                chunk_id = self.ring.add(actions, t_obs)
+                if cfg.chunk_timestamp == "observation":
+                    t_chunk = t_obs
+                elif cfg.chunk_timestamp == "arrival":
+                    t_chunk = time.monotonic()
+                else:
+                    raise RuntimeError(f"Unknown chunk timestamp mode {cfg.chunk_timestamp!r}")
+
+                chunk_id = self.ring.add(actions, t_chunk)
                 a0_d = actions[0] - arm_state
                 print(
                     f"[Producer] {dt_ms:.0f} ms  id={chunk_id}  "
                     f"a0={np.round(actions[0], 1).tolist()}  "
                     f"Δ={np.round(a0_d, 1).tolist()}"
                 )
+                if cfg.min_query_period > 0:
+                    time.sleep(cfg.min_query_period)
             except Exception as e:
                 print(f"[Producer] {type(e).__name__}: {e}")
                 time.sleep(0.1)

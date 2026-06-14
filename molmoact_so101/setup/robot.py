@@ -21,6 +21,7 @@ MOTOR_NAMES = [
     "wrist_flex", "wrist_roll", "gripper",
 ]
 _MAX_JOINT_DELTA = 10.0  # degrees per worker iteration — inner rate limiter
+_WORKER_PERIOD_S = 1.0 / 60.0
 
 
 class FollowerArm:
@@ -100,6 +101,7 @@ class FollowerArm:
                     self._state = state
             except Exception as e:
                 print(f"[Follower] get_observation error: {e}")
+            time.sleep(_WORKER_PERIOD_S)
 
     def set_target(self, target: np.ndarray):
         if self.simulate:

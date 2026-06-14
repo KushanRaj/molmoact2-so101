@@ -9,6 +9,7 @@ lives in runtime.py alongside the safety clamps that need arm-frame numbers.
 """
 import os
 import shutil
+import json
 
 import numpy as np
 import torch
@@ -81,6 +82,32 @@ def _patch_model_for_mixed_dtype(local_dir: str) -> None:
         print(f"[MolmoAct] Cleared dynamic_modules cache at {dyn}.")
 
 
+def _patch_tokenizer_config(local_dir: str) -> None:
+    """Normalize tokenizer config for transformers versions that expect a dict.
+
+    The published checkpoint stores `extra_special_tokens` as a list. Some
+    transformers releases try to call `.keys()` on that field while loading the
+    fast Qwen tokenizer. Keeping the same tokens under
+    `additional_special_tokens` avoids that loader bug without changing token
+    ids in tokenizer.json.
+    """
+    target = os.path.join(local_dir, "tokenizer_config.json")
+    with open(target, "r") as f:
+        cfg = json.load(f)
+    extra = cfg.get("extra_special_tokens")
+    if not isinstance(extra, list):
+        return
+    existing = cfg.get("additional_special_tokens")
+    if existing is None:
+        cfg["additional_special_tokens"] = extra
+    elif isinstance(existing, list):
+        cfg["additional_special_tokens"] = list(dict.fromkeys(existing + extra))
+    del cfg["extra_special_tokens"]
+    with open(target, "w") as f:
+        json.dump(cfg, f)
+    print(f"[MolmoAct] Patched {target} tokenizer special-token config.")
+
+
 class MolmoActPolicy:
     """Wrapper around the published MolmoAct2 model + processor.
 
@@ -116,6 +143,7 @@ class MolmoActPolicy:
 
         print(f"[MolmoAct] Resolving snapshot for {repo_id}...")
         local_dir = snapshot_download(repo_id)
+        _patch_tokenizer_config(local_dir)
         if apply_patches and dtype != "float32":
             _patch_model_for_mixed_dtype(local_dir)
 

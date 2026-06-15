@@ -22,6 +22,7 @@ the ACT temporal-ensembling formulation (Zhao et al. 2023) adapted to async
 inference where chunks arrive every ~700 ms rather than every step.
 """
 import collections
+import json
 import os
 import threading
 import time
@@ -56,7 +57,34 @@ class RuntimeConfig:
     chunk_timestamp: str = "observation"
     scene_only: bool = False
     save_frames_dir: Optional[str] = None
+    action_log_path: Optional[str] = None
     dry_run: bool = False
+
+
+class ActionJsonlLogger:
+    """Thread-safe JSONL logger for model chunks and executed targets."""
+
+    def __init__(self, path: Optional[str]):
+        self.path = path
+        self._lock = threading.Lock()
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+    def write(self, row: dict) -> None:
+        if not self.path:
+            return
+        row = {
+            "wall_time_s": time.time(),
+            "monotonic_s": time.monotonic(),
+            **row,
+        }
+        with self._lock:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _tolist(x) -> list:
+    return np.asarray(x, dtype=np.float32).tolist()
 
 
 class ChunkRingBuffer:
@@ -110,7 +138,7 @@ class _InferenceProducer(threading.Thread):
                  ring: ChunkRingBuffer, frame_buffer: FrameBuffer,
                  signs: np.ndarray, offsets: np.ndarray,
                  joint_min: np.ndarray, joint_max: np.ndarray,
-                 config: RuntimeConfig):
+                 config: RuntimeConfig, logger: ActionJsonlLogger):
         super().__init__(daemon=True, name="InferenceProducer")
         self.policy       = policy
         self.follower     = follower
@@ -123,6 +151,7 @@ class _InferenceProducer(threading.Thread):
         self.joint_min    = joint_min
         self.joint_max    = joint_max
         self.config       = config
+        self.logger       = logger
         self._stop_event  = threading.Event()
 
     def stop(self):
@@ -140,13 +169,14 @@ class _InferenceProducer(threading.Thread):
 
     def _save_inputs(self, frames_bgr):
         if not self.config.save_frames_dir:
-            return
+            return []
         ts = int(time.time() * 1000)
+        paths = []
         for i, im in enumerate(frames_bgr):
-            cv2.imwrite(
-                os.path.join(self.config.save_frames_dir, f"{ts:013d}_in{i}.jpg"),
-                im,
-            )
+            path = os.path.join(self.config.save_frames_dir, f"{ts:013d}_in{i}.jpg")
+            cv2.imwrite(path, im)
+            paths.append(path)
+        return paths
 
     def _postprocess(self, actions: np.ndarray) -> np.ndarray:
         """Convert model-frame chunk to arm frame and apply hard joint limits."""
@@ -171,7 +201,7 @@ class _InferenceProducer(threading.Thread):
                     [scene_bgr, scene_bgr] if cfg.scene_only
                     else [scene_bgr, wrist_bgr]
                 )
-                self._save_inputs(model_inputs_bgr)
+                input_paths = self._save_inputs(model_inputs_bgr)
 
                 state = self.signs * arm_state + self.offsets  # arm → model frame
 
@@ -203,6 +233,24 @@ class _InferenceProducer(threading.Thread):
 
                 chunk_id = self.ring.add(actions, t_chunk)
                 a0_d = actions[0] - arm_state
+                self.logger.write({
+                    "event": "chunk",
+                    "chunk_id": chunk_id,
+                    "prompt": cfg.prompt,
+                    "dt_ms": dt_ms,
+                    "t_observation_s": t_obs,
+                    "t_chunk_s": t_chunk,
+                    "chunk_timestamp_mode": cfg.chunk_timestamp,
+                    "action_fps": ACTION_FPS,
+                    "num_actions": int(actions.shape[0]),
+                    "actions_per_chunk": cfg.actions_per_chunk,
+                    "input_paths": input_paths,
+                    "arm_state": _tolist(arm_state),
+                    "model_state": _tolist(state),
+                    "raw_model_actions": _tolist(raw_actions),
+                    "arm_frame_actions": _tolist(actions),
+                    "a0_delta_arm_frame": _tolist(a0_d),
+                })
                 print(
                     f"[Producer] {dt_ms:.0f} ms  id={chunk_id}  "
                     f"a0={np.round(actions[0], 1).tolist()}  "
@@ -218,7 +266,8 @@ class _InferenceProducer(threading.Thread):
 class _ExecutionConsumer(threading.Thread):
     """Ticks at exec_hz; ensembles active chunks and sends one target per tick."""
 
-    def __init__(self, *, follower, ring: ChunkRingBuffer, config: RuntimeConfig):
+    def __init__(self, *, follower, ring: ChunkRingBuffer, config: RuntimeConfig,
+                 logger: ActionJsonlLogger):
         super().__init__(daemon=True, name="ExecutionConsumer")
         self.follower         = follower
         self.ring             = ring
@@ -227,6 +276,7 @@ class _ExecutionConsumer(threading.Thread):
         self.actions_per_chunk = config.actions_per_chunk
         self.smooth_alpha     = float(np.clip(config.smooth_alpha, 0.05, 1.0))
         self.ensemble_m       = float(config.ensemble_m)
+        self.logger           = logger
         self._last_sent       = None
         self._stop_event      = threading.Event()
         print(f"[Consumer] temporal ensembling  weight=exp(-{self.ensemble_m:.2f}*age_s)  "
@@ -247,6 +297,7 @@ class _ExecutionConsumer(threading.Thread):
 
             active_actions = []
             active_ages    = []
+            active_meta    = []
             for chunk, t_obs, chunk_id in entries:
                 n = chunk.shape[0]
                 if self.actions_per_chunk is not None:
@@ -254,7 +305,14 @@ class _ExecutionConsumer(threading.Thread):
                 step = int((now - t_obs) * ACTION_FPS)
                 if 0 <= step < n:
                     active_actions.append(chunk[step])
-                    active_ages.append(now - t_obs)
+                    age = now - t_obs
+                    active_ages.append(age)
+                    active_meta.append({
+                        "chunk_id": chunk_id,
+                        "step": step,
+                        "valid_steps": int(n),
+                        "age_s": age,
+                    })
                     if chunk_id not in seen_ids:
                         seen_ids.add(chunk_id)
                         print(f"[Consumer] chunk {chunk_id} active  "
@@ -266,6 +324,11 @@ class _ExecutionConsumer(threading.Thread):
                     holding = True
                 if self._last_sent is not None:
                     self.follower.set_target(self._last_sent)
+                    self.logger.write({
+                        "event": "hold",
+                        "exec_hz": self.exec_hz,
+                        "sent_target": _tolist(self._last_sent),
+                    })
                 time.sleep(interval)
                 continue
             holding = False
@@ -274,10 +337,13 @@ class _ExecutionConsumer(threading.Thread):
             weights     = np.exp(-self.ensemble_m * ages)
             weights    /= weights.sum()
             actions_arr = np.stack(active_actions, axis=0)
-            target      = (weights[:, None] * actions_arr).sum(axis=0).astype(np.float32)
+            ensembled_target = (
+                weights[:, None] * actions_arr
+            ).sum(axis=0).astype(np.float32)
 
             cur    = self.follower.get_state().astype(np.float32)
-            target = clip_action(target, cur, self.max_step_deg)
+            clipped_target = clip_action(ensembled_target, cur, self.max_step_deg)
+            target = clipped_target
 
             if self._last_sent is not None and self.smooth_alpha < 1.0:
                 target = (self.smooth_alpha * target
@@ -285,6 +351,20 @@ class _ExecutionConsumer(threading.Thread):
 
             self._last_sent = target
             self.follower.set_target(target)
+            self.logger.write({
+                "event": "target",
+                "exec_hz": self.exec_hz,
+                "action_fps": ACTION_FPS,
+                "active_chunks": active_meta,
+                "ensemble_weights": _tolist(weights),
+                "current_arm_state": _tolist(cur),
+                "active_actions": _tolist(actions_arr),
+                "ensembled_target": _tolist(ensembled_target),
+                "clipped_target": _tolist(clipped_target),
+                "sent_target": _tolist(target),
+                "max_step_deg": self.max_step_deg,
+                "smooth_alpha": self.smooth_alpha,
+            })
             time.sleep(interval)
 
 
@@ -305,18 +385,20 @@ class AsyncPolicyRunner:
                  config: RuntimeConfig):
         self.ring         = ChunkRingBuffer()
         self.frame_buffer = FrameBuffer()
+        self.logger       = ActionJsonlLogger(config.action_log_path)
         self._producer = _InferenceProducer(
             policy=policy, follower=follower, wrist=wrist, scene=scene,
             ring=self.ring, frame_buffer=self.frame_buffer,
             signs=signs, offsets=offsets,
             joint_min=joint_min, joint_max=joint_max,
-            config=config,
+            config=config, logger=self.logger,
         )
         self._consumer = (None if config.dry_run
                           else _ExecutionConsumer(
                               follower=follower,
                               ring=self.ring,
                               config=config,
+                              logger=self.logger,
                           ))
 
     def start(self) -> "AsyncPolicyRunner":

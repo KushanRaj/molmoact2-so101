@@ -134,6 +134,10 @@ def parse_args():
     p.add_argument("--save-frames-dir", default=None,
                    help="Save model input images to this directory each cycle "
                         "(useful for debugging what the model sees).")
+    p.add_argument("--action-log-path", default=None,
+                   help="Write JSONL action diagnostics here. Defaults to "
+                        "<save-frames-dir>/action_log.jsonl when "
+                        "--save-frames-dir is set.")
     p.add_argument("--no-wrist-ae", action="store_true",
                    help="Disable adaptive wrist-camera brightness controller.")
     p.add_argument("--show", action="store_true",
@@ -288,6 +292,11 @@ def main():
     if args.save_frames_dir:
         os.makedirs(args.save_frames_dir, exist_ok=True)
         print(f"[MolmoAct] Saving model-input frames to {args.save_frames_dir}")
+    action_log_path = args.action_log_path
+    if action_log_path is None and args.save_frames_dir:
+        action_log_path = os.path.join(args.save_frames_dir, "action_log.jsonl")
+    if action_log_path:
+        print(f"[MolmoAct] Saving action diagnostics to {action_log_path}")
 
     print(f"[MolmoAct] Task: {args.prompt!r}")
     if args.dry_run:
@@ -308,6 +317,7 @@ def main():
         chunk_timestamp=args.chunk_timestamp,
         scene_only=args.scene_only,
         save_frames_dir=args.save_frames_dir,
+        action_log_path=action_log_path,
         dry_run=args.dry_run,
     )
 
